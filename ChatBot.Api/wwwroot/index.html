@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local Documents Chat</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: #17212b;
+      background: #f3f6f8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      max-width: 980px;
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 32px 20px;
+    }
+
+    header { margin-bottom: 24px; }
+    h1 { margin: 0 0 6px; font-size: 1.8rem; }
+    header p, .hint { color: #52616b; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 280px;
+      gap: 20px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid #d9e1e6;
+      border-radius: 12px;
+      background: white;
+      box-shadow: 0 5px 20px #17212b0a;
+    }
+
+    .chat-panel { display: flex; min-height: 70vh; flex-direction: column; }
+    #messages { display: flex; flex: 1; flex-direction: column; gap: 14px; padding: 20px; }
+    .message { max-width: 88%; padding: 12px 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .user { align-self: flex-end; background: #e8f1ff; }
+    .assistant { align-self: flex-start; background: #f1f4f6; }
+    .message-label { margin-bottom: 5px; color: #52616b; font-size: .78rem; font-weight: 600; }
+    .sources { margin-top: 12px; color: #52616b; font-size: .82rem; }
+    .sources ul { margin: 6px 0 0; padding-left: 20px; }
+
+    form { padding: 16px 20px; border-top: 1px solid #e5eaed; }
+    .composer { display: flex; gap: 8px; }
+    textarea, input[type="file"] { width: 100%; font: inherit; }
+    textarea { min-height: 76px; resize: vertical; padding: 10px; border: 1px solid #c8d2d9; border-radius: 8px; }
+    button { border: 0; border-radius: 8px; padding: 10px 16px; color: white; background: #175ea8; font: inherit; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .send-button { align-self: flex-end; min-height: 42px; }
+    .toggle { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font-size: .92rem; }
+
+    aside { padding: 18px; }
+    aside h2 { margin: 0 0 8px; font-size: 1.1rem; }
+    aside p { color: #52616b; font-size: .9rem; line-height: 1.45; }
+    .upload-form { display: grid; gap: 12px; margin-top: 16px; }
+    .upload-form button { width: 100%; }
+    #status { min-height: 1.4em; margin-top: 12px; font-size: .88rem; }
+    #status[data-error="true"] { color: #b42318; }
+    .hint { margin: 12px 0 0; font-size: .8rem; }
+
+    @media (max-width: 700px) {
+      body { padding: 20px 12px; }
+      .layout { grid-template-columns: 1fr; }
+      .chat-panel { min-height: 58vh; }
+      .message { max-width: 96%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Local Documents Chat</h1>
+    <p>Chat with Ollama, or ask questions grounded in your uploaded documents.</p>
+  </header>
+
+  <main class="layout">
+    <section class="panel chat-panel" aria-label="Chat">
+      <div id="messages" aria-live="polite">
+        <div class="message assistant">
+          <div class="message-label">Assistant</div>
+          <div>Hi! Ask me anything, or enable document mode to ask about your uploaded files.</div>
+        </div>
+      </div>
+      <form id="chat-form">
+        <div class="composer">
+          <textarea id="message" aria-label="Message" placeholder="Write a message..." required></textarea>
+          <button class="send-button" id="send-button" type="submit">Send</button>
+        </div>
+        <label class="toggle">
+          <input id="rag-toggle" type="checkbox">
+          Use my documents (RAG)
+        </label>
+      </form>
+    </section>
+
+    <aside class="panel">
+      <h2>Your documents</h2>
+      <p>Upload PDF, TXT, or Markdown files to make them available in document chat.</p>
+      <form class="upload-form" id="upload-form">
+        <input id="file" name="file" type="file" accept=".pdf,.txt,.md" required>
+        <button id="upload-button" type="submit">Upload document</button>
+      </form>
+      <div id="status" role="status" aria-live="polite"></div>
+      <p class="hint">PDF text extraction works best with text-based PDFs. Scanned image PDFs need OCR.</p>
+    </aside>
+  </main>
+
+  <script>
+    const messages = document.querySelector("#messages");
+    const chatForm = document.querySelector("#chat-form");
+    const messageInput = document.querySelector("#message");
+    const ragToggle = document.querySelector("#rag-toggle");
+    const sendButton = document.querySelector("#send-button");
+    const uploadForm = document.querySelector("#upload-form");
+    const fileInput = document.querySelector("#file");
+    const uploadButton = document.querySelector("#upload-button");
+    const status = document.querySelector("#status");
+    const conversationId = sessionStorage.getItem("conversationId") || crypto.randomUUID();
+    sessionStorage.setItem("conversationId", conversationId);
+
+    function addMessage(role, label, text = "") {
+      const bubble = document.createElement("article");
+      bubble.className = `message ${role}`;
+
+      const heading = document.createElement("div");
+      heading.className = "message-label";
+      heading.textContent = label;
+
+      const content = document.createElement("div");
+      content.textContent = text;
+      bubble.append(heading, content);
+      messages.append(bubble);
+      bubble.scrollIntoView({ block: "nearest" });
+      return { bubble, content };
+    }
+
+    function showSources(bubble, sources) {
+      if (!sources?.length) return;
+
+      const container = document.createElement("div");
+      container.className = "sources";
+      const title = document.createElement("strong");
+      title.textContent = "Sources";
+      const list = document.createElement("ul");
+
+      for (const source of sources) {
+        const item = document.createElement("li");
+        item.textContent = `${source.fileName}, chunk ${source.chunkIndex + 1} (score ${source.score.toFixed(2)})`;
+        list.append(item);
+      }
+
+      container.append(title, list);
+      bubble.append(container);
+    }
+
+    async function readError(response) {
+      const body = await response.text();
+      try {
+        const problem = JSON.parse(body);
+        return problem.error || problem.detail || problem.title || body;
+      } catch {
+        return body || `Request failed (${response.status}).`;
+      }
+    }
+
+    async function streamPlainChat(response, answer) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        answer.content.textContent += decoder.decode(value, { stream: true });
+      }
+      answer.content.textContent += decoder.decode();
+    }
+
+    async function streamRagChat(response, answer) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+
+      async function consume(line) {
+        if (!line.trim()) return;
+        const event = JSON.parse(line);
+        if (event.type === "delta") {
+          answer.content.textContent += event.text || "";
+        } else if (event.type === "sources") {
+          showSources(answer.bubble, event.sources);
+        }
+      }
+
+      while (true) {
+        const { value, done } = await reader.read();
+        pending += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = pending.split("\n");
+        pending = lines.pop();
+        for (const line of lines) await consume(line);
+        if (done) break;
+      }
+
+      if (pending.trim()) await consume(pending);
+    }
+
+    chatForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const text = messageInput.value.trim();
+      if (!text) return;
+
+      const useRag = ragToggle.checked;
+      addMessage("user", "You", text);
+      const answer = addMessage("assistant", "Assistant");
+      messageInput.value = "";
+      sendButton.disabled = true;
+
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversationId, message: text, useRag })
+        });
+
+        if (!response.ok) throw new Error(await readError(response));
+        if (!response.body) throw new Error("The server did not return a response stream.");
+
+        if (useRag) await streamRagChat(response, answer);
+        else await streamPlainChat(response, answer);
+      } catch (error) {
+        answer.content.textContent = `Error: ${error.message}`;
+      } finally {
+        sendButton.disabled = false;
+        messageInput.focus();
+      }
+    });
+
+    uploadForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      status.textContent = "Uploading and indexing document...";
+      status.dataset.error = "false";
+      uploadButton.disabled = true;
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const response = await fetch("/api/documents", { method: "POST", body: formData });
+        if (!response.ok) throw new Error(await readError(response));
+        const result = await response.json();
+        status.textContent = `Indexed ${result.fileName} (${result.chunks} chunks).`;
+        fileInput.value = "";
+      } catch (error) {
+        status.textContent = `Upload failed: ${error.message}`;
+        status.dataset.error = "true";
+      } finally {
+        uploadButton.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
